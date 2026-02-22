@@ -43,7 +43,9 @@ app_license = "mit"
 # page_js = {"page" : "public/js/file.js"}
 
 # include js in doctype views
-# doctype_js = {"doctype" : "public/js/doctype.js"}
+doctype_js = {
+	"Delivery Note": "serial_number_manager/public/js/delivery_note.js"
+}
 # doctype_list_js = {"doctype" : "public/js/doctype_list.js"}
 # doctype_tree_js = {"doctype" : "public/js/doctype_tree.js"}
 # doctype_calendar_js = {"doctype" : "public/js/doctype_calendar.js"}
@@ -137,13 +139,26 @@ app_license = "mit"
 # ---------------
 # Hook on document methods and events
 
-# doc_events = {
-# 	"*": {
-# 		"on_update": "method",
-# 		"on_cancel": "method",
-# 		"on_trash": "method"
-# 	}
-# }
+doc_events = {
+	"Delivery Note": {
+		"on_submit": "serial_number_manager.serial_number_manager.overrides.delivery_note.add_serials_to_description_on_submit"
+	},
+	"Sales Invoice": {
+		"before_submit": "serial_number_manager.serial_number_manager.overrides.sales_invoice.add_serials_from_dn_on_submit"
+	}
+}
+
+# Fixtures
+# --------
+# Automatically install custom fields for Serial No doctype
+fixtures = [
+	{
+		"doctype": "Custom Field",
+		"filters": [
+			["dt", "in", ["Serial No"]]
+		]
+	}
+]
 
 # Scheduled Tasks
 # ---------------
