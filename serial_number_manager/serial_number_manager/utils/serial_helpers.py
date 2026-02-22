@@ -10,7 +10,6 @@ License: MIT
 
 import frappe
 from frappe.utils import cstr
-from bs4 import BeautifulSoup
 
 
 def get_serial_numbers_from_bundle(bundle_id):
@@ -108,42 +107,24 @@ def append_serial_numbers_to_description(description, serial_numbers):
 		return description
 
 	# Build serial number section HTML
-	serial_section = "<p><strong>S/N:</strong></p>"
+	# Escape each serial number to prevent XSS
+	serial_lines = []
 	for serial in serial_numbers:
-		# Escape HTML to prevent injection
 		safe_serial = frappe.utils.escape_html(cstr(serial))
-		serial_section += f"<p>{safe_serial}</p>"
+		serial_lines.append(f"<p>{safe_serial}</p>")
 
-	# Parse existing description
+	serial_section = f"<p><strong>S/N:</strong></p>{''.join(serial_lines)}"
+
+	# Get existing description (empty string if None)
 	description = cstr(description).strip()
 
 	# If description is empty, return just the serial section
 	if not description:
 		return serial_section
 
-	# Use BeautifulSoup to safely manipulate HTML
-	soup = BeautifulSoup(description, 'html.parser')
-
-	# Find or create a wrapper div for the content
-	wrapper_div = soup.find('div')
-	if not wrapper_div:
-		# Create a div to wrap all content
-		wrapper_div = soup.new_tag('div')
-		# Move all existing content into the div
-		for element in list(soup.children):
-			wrapper_div.append(element.extract())
-		soup.append(wrapper_div)
-
-	# Add a blank line separator
-	blank_p = soup.new_tag('p')
-	wrapper_div.append(blank_p)
-
-	# Parse and append the serial section
-	serial_soup = BeautifulSoup(serial_section, 'html.parser')
-	for element in serial_soup.children:
-		wrapper_div.append(element)
-
-	return str(soup)
+	# Simple approach: append serial section to existing description
+	# Add two line breaks for separation
+	return f"{description}<br><br>{serial_section}"
 
 
 def format_serial_numbers_for_display(serial_numbers):
