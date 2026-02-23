@@ -40,12 +40,11 @@ frappe.ui.form.on('Delivery Note Item', {
 /**
  * Check if serial number count matches qty, clear if mismatch.
  *
- * Logic:
- * - If item has serial numbers enabled (has_serial_no)
+ * Logic (synchronous - no async DB call needed):
+ * - If serial_no has content, item is serialized (ERPNext only fills this for serialized items)
  * - AND qty > 1
- * - AND serial_no field has content
- * - AND count of serials != qty
- * - THEN clear serial_no field to trigger auto-fill
+ * - AND exactly 1 serial is entered but qty > 1
+ * - THEN clear serial_no field to trigger ERPNext's auto-fill on save
  *
  * @param {Object} item - Delivery Note Item row
  */
@@ -55,42 +54,39 @@ function fix_serial_number_count(item) {
 		return;
 	}
 
-	// Check if item has serial numbers enabled
-	frappe.db.get_value('Item', item.item_code, 'has_serial_no', function(r) {
-		if (!r || !r.has_serial_no) {
-			return;
-		}
+	let serial_no_field = (item.serial_no || '').trim();
 
-		// Check qty and serial_no field
-		let qty = flt(item.qty);
-		let serial_no_field = (item.serial_no || '').trim();
+	// If serial_no is empty, no action needed
+	// (item is not serialized, or user hasn't entered anything yet)
+	if (!serial_no_field) {
+		return;
+	}
 
-		// If qty is 1 or less, or serial_no is empty, no action needed
-		if (qty <= 1 || !serial_no_field) {
-			return;
-		}
+	let qty = flt(item.qty);
 
-		// Count serial numbers (split by newline or comma)
-		let serial_numbers = serial_no_field
-			.split(/[\n,]/)
-			.map(s => s.trim())
-			.filter(s => s.length > 0);
+	// If qty is 1 or less, no mismatch possible
+	if (qty <= 1) {
+		return;
+	}
 
-		let serial_count = serial_numbers.length;
+	// Count serial numbers (split by newline or comma)
+	let serial_numbers = serial_no_field
+		.split(/[\n,]/)
+		.map(s => s.trim())
+		.filter(s => s.length > 0);
 
-		// If count doesn't match qty and only 1 serial is present, clear the field
-		if (serial_count !== qty && serial_count === 1) {
-			// Clear the field to allow auto-fill
-			frappe.model.set_value(item.doctype, item.name, 'serial_no', '');
+	let serial_count = serial_numbers.length;
 
-			// Show friendly message to user
-			frappe.show_alert({
-				message: __('Serial number field cleared for item {0}. System will auto-fill {1} serial numbers.',
-					[item.item_code, qty]),
-				indicator: 'blue'
-			}, 5);
+	// If exactly 1 serial entered but qty > 1, clear the field to allow auto-fill
+	if (serial_count === 1) {
+		frappe.model.set_value(item.doctype, item.name, 'serial_no', '');
 
-			console.log(`Serial number auto-fix: Cleared field for item ${item.item_code} (qty: ${qty}, had: ${serial_count})`);
-		}
-	});
+		frappe.show_alert({
+			message: __('Serial number field cleared for item {0}. System will auto-fill {1} serial numbers.',
+				[item.item_code, qty]),
+			indicator: 'blue'
+		}, 5);
+
+		console.log(`Serial number auto-fix: Cleared field for item ${item.item_code} (qty: ${qty}, had: ${serial_count})`);
+	}
 }

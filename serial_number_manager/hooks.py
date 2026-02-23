@@ -141,7 +141,7 @@ doctype_js = {
 
 doc_events = {
 	"Delivery Note": {
-		"on_submit": "serial_number_manager.serial_number_manager.overrides.delivery_note.add_serials_to_description_on_submit"
+		"before_submit": "serial_number_manager.serial_number_manager.overrides.delivery_note.add_serials_to_description_before_submit"
 	},
 	"Sales Invoice": {
 		"before_submit": "serial_number_manager.serial_number_manager.overrides.sales_invoice.add_serials_from_dn_on_submit"

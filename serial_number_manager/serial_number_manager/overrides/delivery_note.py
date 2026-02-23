@@ -23,11 +23,11 @@ from serial_number_manager.serial_number_manager.utils.serial_helpers import (
 )
 
 
-def add_serials_to_description_on_submit(doc, method=None):
+def add_serials_to_description_before_submit(doc, method=None):
 	"""
-	Hook: Delivery Note.on_submit
+	Hook: Delivery Note.before_submit
 
-	Appends serial numbers to item descriptions after DN submission.
+	Appends serial numbers to item descriptions before DN submission is finalized.
 	Only processes items with serial_and_batch_bundle set.
 
 	The function:
