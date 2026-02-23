@@ -53,23 +53,38 @@ def add_serials_from_dn_on_submit(doc, method=None):
 	modified_count = 0
 
 	for item in doc.items:
-		# Only process items linked to Delivery Note
-		if not item.dn_detail:
-			continue
+		# Find the linked Delivery Note item.
+		# Two paths depending on how the SI was created:
+		# - From Delivery Note: item.dn_detail is set directly
+		# - From Sales Order: only item.so_detail is set; find DN item via SO item reference
+		dn_item = None
 
-		# Get DN item details
-		dn_item = frappe.db.get_value(
-			"Delivery Note Item",
-			item.dn_detail,
-			["parent", "serial_and_batch_bundle"],
-			as_dict=True
-		)
+		if item.dn_detail:
+			dn_item = frappe.db.get_value(
+				"Delivery Note Item",
+				item.dn_detail,
+				["parent", "serial_and_batch_bundle"],
+				as_dict=True
+			)
+		elif item.so_detail:
+			# SI was created from SO: look up submitted DN items via the shared so_detail reference
+			candidates = frappe.db.get_all(
+				"Delivery Note Item",
+				filters={"so_detail": item.so_detail},
+				fields=["name", "parent", "serial_and_batch_bundle"],
+				limit=5
+			)
+			for candidate in candidates:
+				if frappe.db.get_value("Delivery Note", candidate.parent, "docstatus") == 1:
+					dn_item = candidate
+					break
 
 		if not dn_item:
-			frappe.logger().warning(
-				f"Sales Invoice {doc.name}, Item {item.item_code}: "
-				f"DN item {item.dn_detail} not found"
-			)
+			if item.dn_detail or item.so_detail:
+				frappe.logger().warning(
+					f"Sales Invoice {doc.name}, Item {item.item_code}: "
+					f"No submitted Delivery Note item found (dn_detail={item.dn_detail}, so_detail={item.so_detail})"
+				)
 			continue
 
 		if not dn_item.serial_and_batch_bundle:
