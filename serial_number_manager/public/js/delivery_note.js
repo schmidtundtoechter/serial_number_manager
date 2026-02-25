@@ -8,13 +8,13 @@
  * ERPNext doesn't auto-fill the remaining serials. User must clear the field for
  * auto-fill to work.
  *
- * Solution: Before save, detect this scenario and auto-clear the serial_no field
- * to allow ERPNext's auto-fill mechanism to populate correct number of serials.
+ * Solution: On validate, detect this scenario and auto-clear both serial_no and
+ * serial_and_batch_bundle so ERPNext's auto-fill mechanism populates the correct
+ * number of serials on save.
  */
 
 frappe.ui.form.on('Delivery Note', {
-	before_save: function(frm) {
-		// Process each item before save
+	validate: function(frm) {
 		if (frm.doc.items && frm.doc.items.length > 0) {
 			frm.doc.items.forEach(function(item) {
 				fix_serial_number_count(item);
@@ -24,62 +24,41 @@ frappe.ui.form.on('Delivery Note', {
 });
 
 frappe.ui.form.on('Delivery Note Item', {
-	qty: function(frm, cdt, cdn) {
-		// Also check when qty changes
-		let item = locals[cdt][cdn];
-		fix_serial_number_count(item);
-	},
-
-	serial_no: function(frm, cdt, cdn) {
-		// Check when serial_no field is manually edited
+	qty: function(_frm, cdt, cdn) {
 		let item = locals[cdt][cdn];
 		fix_serial_number_count(item);
 	}
 });
 
 /**
- * Check if serial number count matches qty, clear if mismatch.
+ * Check if serial number count matches qty; clear both serial fields if mismatch.
  *
- * Logic (synchronous - no async DB call needed):
- * - If serial_no has content, item is serialized (ERPNext only fills this for serialized items)
- * - AND qty > 1
- * - AND exactly 1 serial is entered but qty > 1
- * - THEN clear serial_no field to trigger ERPNext's auto-fill on save
+ * If serial_no has exactly 1 entry but qty > 1, clear both serial_no and
+ * serial_and_batch_bundle so ERPNext can auto-fill the correct number on save.
  *
  * @param {Object} item - Delivery Note Item row
  */
 function fix_serial_number_count(item) {
-	// Only process if item has item_code
-	if (!item.item_code) {
-		return;
-	}
+	if (!item.item_code) return;
 
 	let serial_no_field = (item.serial_no || '').trim();
-
-	// If serial_no is empty, no action needed
-	// (item is not serialized, or user hasn't entered anything yet)
-	if (!serial_no_field) {
-		return;
-	}
+	if (!serial_no_field) return;
 
 	let qty = flt(item.qty);
+	if (qty <= 1) return;
 
-	// If qty is 1 or less, no mismatch possible
-	if (qty <= 1) {
-		return;
-	}
-
-	// Count serial numbers (split by newline or comma)
 	let serial_numbers = serial_no_field
 		.split(/[\n,]/)
 		.map(s => s.trim())
 		.filter(s => s.length > 0);
 
-	let serial_count = serial_numbers.length;
-
-	// If exactly 1 serial entered but qty > 1, clear the field to allow auto-fill
-	if (serial_count === 1) {
-		frappe.model.set_value(item.doctype, item.name, 'serial_no', '');
+	if (serial_numbers.length > 0 && serial_numbers.length < qty) {
+		// Use direct synchronous assignment — frappe.model.set_value is async and
+		// would not take effect before the save request is dispatched from validate.
+		item.serial_no = '';
+		if (item.hasOwnProperty('serial_and_batch_bundle')) {
+			item.serial_and_batch_bundle = '';
+		}
 
 		frappe.show_alert({
 			message: __('Serial number field cleared for item {0}. System will auto-fill {1} serial numbers.',
@@ -87,6 +66,6 @@ function fix_serial_number_count(item) {
 			indicator: 'blue'
 		}, 5);
 
-		console.log(`Serial number auto-fix: Cleared field for item ${item.item_code} (qty: ${qty}, had: ${serial_count})`);
+		console.log(`Serial number auto-fix: Cleared fields for item ${item.item_code} (qty: ${qty}, had: ${serial_numbers.length})`);
 	}
 }
