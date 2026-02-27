@@ -290,3 +290,60 @@ def add_serials_to_description_before_submit(doc, method=None):
 		frappe.logger().info(
 			f"DN {doc.name}: safety net added serial descriptions for {modified_count} item(s)"
 		)
+
+
+# ---------------------------------------------------------------------------
+# Hook 4: on_submit — reliable fallback after bundle is fully committed
+# ---------------------------------------------------------------------------
+
+def add_serials_to_description_on_submit(doc, method=None):
+	"""
+	Hook: Delivery Note.on_submit
+
+	Runs after the DN is submitted and all Serial and Batch Bundles are fully
+	committed to the database. This is the most reliable point to read bundle
+	entries, since the bundle is now in its final submitted state.
+
+	Uses frappe.db.set_value to update descriptions directly — this avoids
+	triggering another save cycle while ensuring the printed DN is correct.
+
+	This complements before_submit: if before_submit already added serial
+	numbers (duplicate check via has_serial_numbers_in_description), this hook
+	is a no-op. It only acts when before_submit missed them.
+	"""
+	if not doc.items:
+		return
+
+	modified_count = 0
+
+	for item in doc.items:
+		serial_numbers = _get_serial_numbers_for_item(item)
+
+		if not serial_numbers:
+			continue
+
+		if has_serial_numbers_in_description(item.description):
+			continue  # Already there — nothing to do
+
+		new_description = append_serial_numbers_to_description(
+			item.description,
+			serial_numbers
+		)
+
+		frappe.db.set_value(
+			"Delivery Note Item",
+			item.name,
+			"description",
+			new_description
+		)
+
+		frappe.logger().info(
+			f"DN {doc.name}, Item {item.item_code}: "
+			f"on_submit added {len(serial_numbers)} serial(s) to description"
+		)
+		modified_count += 1
+
+	if modified_count > 0:
+		frappe.logger().info(
+			f"DN {doc.name}: on_submit added serial descriptions for {modified_count} item(s)"
+		)

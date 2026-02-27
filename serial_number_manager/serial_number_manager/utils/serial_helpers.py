@@ -33,11 +33,15 @@ def get_serial_numbers_from_bundle(bundle_id):
 		return []
 
 	try:
-		# Use ERPNext's built-in function to get serial numbers from bundle
-		from erpnext.stock.serial_batch_bundle import get_serial_nos
-
-		serial_numbers = get_serial_nos(bundle_id)
-		return sorted(serial_numbers) if serial_numbers else []
+		# Query bundle entries directly from DB — this works regardless of the
+		# bundle's submission state (draft or submitted), so it is safe to call
+		# from both before_submit and on_submit hooks.
+		entries = frappe.get_all(
+			"Serial and Batch Entry",
+			filters={"parent": bundle_id, "serial_no": ["!=", ""]},
+			fields=["serial_no"]
+		)
+		return sorted([e.serial_no for e in entries if e.serial_no])
 
 	except Exception as e:
 		frappe.log_error(
