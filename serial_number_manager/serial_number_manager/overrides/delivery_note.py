@@ -1,13 +1,19 @@
 """
 Delivery Note: Serial number management hooks.
 
-1. fix_serial_count_on_validate  — Server-side safety net (validate event).
-   Detects when a Serial and Batch Bundle has the wrong number of serial
-   entries vs the item qty, clears the bad bundle so ERPNext can auto-assign
-   the correct count on the same save.
+1. fix_serial_count_on_validate  — validate event (draft only).
+   Detects wrong serial count vs item qty and auto-assigns the correct
+   serial numbers from the warehouse in the same save. The user can
+   review and override before submitting.
 
-2. add_serials_to_description_before_submit — Appends serial numbers to item
-   descriptions before DN submission so they appear in the PDF.
+2. add_serials_to_description_on_update  — on_update event (draft only).
+   After every save, writes the current serial numbers into the item
+   description so they are visible and editable before submission.
+   Uses frappe.db.set_value to avoid triggering a recursive save.
+
+3. add_serials_to_description_before_submit  — before_submit event.
+   Safety net only. Adds S/N to description if somehow not already there.
+   Has duplicate-check so it never runs twice.
 
 Copyright (c) 2026, ahmad mohammad and contributors
 License: MIT
@@ -22,25 +28,83 @@ from serial_number_manager.serial_number_manager.utils.serial_helpers import (
 )
 
 
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+def _get_serial_numbers_for_item(item):
+	"""
+	Return the serial numbers currently assigned to a DN item.
+
+	Mode A — bundle system: reads from Serial and Batch Bundle entries.
+	Mode B — legacy text-field: reads directly from serial_no.
+
+	Returns a sorted list of strings, or an empty list.
+	"""
+	if item.get("serial_and_batch_bundle"):
+		return get_serial_numbers_from_bundle(item.serial_and_batch_bundle)
+
+	if item.get("serial_no"):
+		return sorted([
+			s.strip()
+			for s in (item.serial_no or "").strip().split("\n")
+			if s.strip()
+		])
+
+	return []
+
+
+def _auto_assign_serials(item, doc):
+	"""
+	Query available serial numbers from the warehouse and assign them to
+	item.serial_no (Mode B / legacy text-field mode only).
+
+	Returns True and fills item.serial_no if enough serials are available.
+	Returns False if stock is insufficient (item.serial_no is left empty).
+	"""
+	warehouse = item.get("warehouse") or doc.get("set_warehouse")
+	if not warehouse:
+		return False
+
+	item_qty = cint(item.qty)
+	available = frappe.get_all(
+		"Serial No",
+		filters={
+			"item_code": item.item_code,
+			"warehouse": warehouse,
+			"status": "Active"
+		},
+		fields=["name"],
+		limit=item_qty,
+		order_by="creation asc"  # oldest first (FIFO)
+	)
+
+	if len(available) >= item_qty:
+		item.serial_no = "\n".join([s.name for s in available[:item_qty]])
+		return True
+
+	return False
+
+
+# ---------------------------------------------------------------------------
+# Hook 1: validate — fix serial count, auto-assign if needed
+# ---------------------------------------------------------------------------
+
 def fix_serial_count_on_validate(doc, method=None):
 	"""
-	Hook: Delivery Note.validate
+	Hook: Delivery Note.validate  (draft only)
 
-	Detects a mismatch between assigned serial numbers and item qty, then
-	clears the bad data so ERPNext can auto-assign the correct count.
+	Detects a mismatch between the number of assigned serial numbers and the
+	item quantity, then auto-assigns the correct serials from the warehouse in
+	the same save — so the user can review and change them before submitting.
 
-	Handles both ERPNext serial modes:
+	Mode A — Bundle system (serial_and_batch_bundle is set):
+	  Counts bundle entries; if wrong, deletes the bad bundle and clears both
+	  fields. ERPNext will re-create the bundle on submit.
 
-	  Mode A — Bundle system (use_serial_batch_fields = 0, ERPNext v15 default):
-	    Serial numbers live in a Serial and Batch Bundle document linked via
-	    serial_and_batch_bundle. We count the bundle's entries and delete the
-	    orphaned bundle document if the count is wrong.
-
-	  Mode B — Legacy text-field system (use_serial_batch_fields = 1):
-	    Serial numbers live directly in the serial_no text field; no bundle
-	    document exists. We just count newline-separated entries in serial_no.
-
-	Only runs on draft documents (docstatus = 0).
+	Mode B — Legacy text-field (use_serial_batch_fields = 1):
+	  Counts newline-separated entries in serial_no; if wrong, queries the
+	  warehouse for available serial numbers and assigns them directly.
 	"""
 	if doc.docstatus != 0:
 		return
@@ -50,9 +114,7 @@ def fix_serial_count_on_validate(doc, method=None):
 		if item_qty <= 0:
 			continue
 
-		# ------------------------------------------------------------------
-		# Mode A: Bundle system — serial_and_batch_bundle is set
-		# ------------------------------------------------------------------
+		# ── Mode A: Bundle system ──────────────────────────────────────────
 		if item.get("serial_and_batch_bundle"):
 			entries = frappe.get_all(
 				"Serial and Batch Entry",
@@ -76,7 +138,6 @@ def fix_serial_count_on_validate(doc, method=None):
 			item.serial_and_batch_bundle = None
 			item.serial_no = ""
 
-			# Delete the now-orphaned draft bundle document
 			try:
 				if frappe.db.exists("Serial and Batch Bundle", bundle_name):
 					frappe.delete_doc(
@@ -91,17 +152,15 @@ def fix_serial_count_on_validate(doc, method=None):
 				)
 
 			frappe.msgprint(
-				frappe._("Serial numbers auto-cleared for {0} (bundle had {1}, qty = {2}). "
-					"ERPNext will now auto-assign the correct serial numbers.").format(
+				frappe._("Serial bundle cleared for {0} (had {1}, qty = {2}). "
+					"Assign serial numbers before submitting.").format(
 					item.item_code, serial_count, item_qty
 				),
 				alert=True,
 				indicator="blue"
 			)
 
-		# ------------------------------------------------------------------
-		# Mode B: Legacy text-field system — serial_no has content, no bundle
-		# ------------------------------------------------------------------
+		# ── Mode B: Legacy text-field system ──────────────────────────────
 		elif item.get("serial_no"):
 			serial_nos = [
 				s.strip()
@@ -114,56 +173,93 @@ def fix_serial_count_on_validate(doc, method=None):
 				continue  # Correct count — nothing to fix
 
 			frappe.logger().info(
-				f"DN {doc.name}, Item {item.item_code}: serial_no field has "
-				f"{serial_count} serial(s) but qty = {item_qty}. Clearing."
+				f"DN {doc.name}, Item {item.item_code}: serial_no has {serial_count} "
+				f"serial(s) but qty = {item_qty}. Auto-assigning."
 			)
 
-			item.serial_no = ""
+			assigned = _auto_assign_serials(item, doc)
 
-			frappe.msgprint(
-				frappe._("Serial numbers auto-cleared for {0} (had {1}, qty = {2}). "
-					"ERPNext will now auto-assign the correct serial numbers.").format(
-					item.item_code, serial_count, item_qty
-				),
-				alert=True,
-				indicator="blue"
-			)
+			if assigned:
+				assigned_list = [s.strip() for s in item.serial_no.split("\n") if s.strip()]
+				frappe.msgprint(
+					frappe._("Auto-assigned {0} serial number(s) for {1}: {2}").format(
+						item_qty,
+						item.item_code,
+						", ".join(assigned_list)
+					),
+					alert=True,
+					indicator="blue"
+				)
+				frappe.logger().info(
+					f"DN {doc.name}, Item {item.item_code}: auto-assigned {item_qty} serial(s)"
+				)
+			else:
+				item.serial_no = ""
+				frappe.msgprint(
+					frappe._("Not enough serial numbers in stock for {0} "
+						"(need {1}). Please assign manually.").format(
+						item.item_code, item_qty
+					),
+					alert=True,
+					indicator="orange"
+				)
 
 
-def _get_serial_numbers_for_item(item):
+# ---------------------------------------------------------------------------
+# Hook 2: on_update — write S/N into description after every save
+# ---------------------------------------------------------------------------
+
+def add_serials_to_description_on_update(doc, method=None):
 	"""
-	Extract serial numbers for a DN item regardless of which ERPNext mode is used.
+	Hook: Delivery Note.on_update  (draft only)
 
-	Mode A (bundle system): reads from Serial and Batch Bundle entries.
-	Mode B (legacy text-field): reads directly from the serial_no text field.
+	After every save, checks each item for assigned serial numbers and appends
+	them to the item description so the user can see them before submitting.
 
-	Returns a sorted list of serial number strings, or an empty list.
+	Uses frappe.db.set_value to update only the description column directly —
+	this avoids triggering another save/validate cycle (no recursion).
 	"""
-	# Mode A: bundle system
-	if item.get("serial_and_batch_bundle"):
-		return get_serial_numbers_from_bundle(item.serial_and_batch_bundle)
+	if doc.docstatus != 0:
+		return
 
-	# Mode B: legacy text-field system
-	if item.get("serial_no"):
-		return sorted([
-			s.strip()
-			for s in (item.serial_no or "").strip().split("\n")
-			if s.strip()
-		])
+	for item in doc.items:
+		serial_numbers = _get_serial_numbers_for_item(item)
 
-	return []
+		if not serial_numbers:
+			continue
 
+		if has_serial_numbers_in_description(item.description):
+			continue  # Already shows S/N — skip
+
+		new_description = append_serial_numbers_to_description(
+			item.description,
+			serial_numbers
+		)
+
+		frappe.db.set_value(
+			"Delivery Note Item",
+			item.name,
+			"description",
+			new_description
+		)
+
+		frappe.logger().info(
+			f"DN {doc.name}, Item {item.item_code}: "
+			f"Added {len(serial_numbers)} serial(s) to description on save"
+		)
+
+
+# ---------------------------------------------------------------------------
+# Hook 3: before_submit — safety net only (duplicate-safe)
+# ---------------------------------------------------------------------------
 
 def add_serials_to_description_before_submit(doc, method=None):
 	"""
-	Hook: Delivery Note.before_submit
+	Hook: Delivery Note.before_submit  — safety net only.
 
-	Appends serial numbers to each serialized item's description so they appear
-	on the submitted DN document and in its PDF.
-
-	Works in both ERPNext serial modes:
-	  Mode A — Bundle system (serial_and_batch_bundle is set)
-	  Mode B — Legacy text-field system (serial_no has content)
+	Adds S/N to item description if it is somehow not already there.
+	The duplicate check (has_serial_numbers_in_description) ensures this
+	never runs twice or overwrites what on_update already wrote.
 	"""
 	if not doc.items:
 		return
@@ -176,13 +272,8 @@ def add_serials_to_description_before_submit(doc, method=None):
 		if not serial_numbers:
 			continue
 
-		# Prevent duplicates on re-submit / amendment
 		if has_serial_numbers_in_description(item.description):
-			frappe.logger().debug(
-				f"Delivery Note {doc.name}, Item {item.item_code}: "
-				f"Serial numbers already in description, skipping"
-			)
-			continue
+			continue  # Already there — nothing to do
 
 		item.description = append_serial_numbers_to_description(
 			item.description,
@@ -191,11 +282,11 @@ def add_serials_to_description_before_submit(doc, method=None):
 		modified_count += 1
 
 		frappe.logger().info(
-			f"Delivery Note {doc.name}, Item {item.item_code}: "
-			f"Added {len(serial_numbers)} serial numbers to description"
+			f"DN {doc.name}, Item {item.item_code}: "
+			f"Safety net added {len(serial_numbers)} serial(s) to description on submit"
 		)
 
 	if modified_count > 0:
 		frappe.logger().info(
-			f"Delivery Note {doc.name}: Added serial numbers to {modified_count} item(s)"
+			f"DN {doc.name}: safety net added serial descriptions for {modified_count} item(s)"
 		)
