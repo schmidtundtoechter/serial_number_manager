@@ -347,3 +347,82 @@ def add_serials_to_description_on_submit(doc, method=None):
 		frappe.logger().info(
 			f"DN {doc.name}: on_submit added serial descriptions for {modified_count} item(s)"
 		)
+
+
+# ---------------------------------------------------------------------------
+# Hook 5: on_submit — backfill serials into already-submitted Sales Invoices
+# ---------------------------------------------------------------------------
+
+def update_submitted_si_with_serials(doc, method=None):
+	"""
+	Hook: Delivery Note.on_submit  (runs alongside add_serials_to_description_on_submit)
+
+	Handles the Q→SO→SI→DN workflow where the user submits the Sales Invoice
+	BEFORE the Delivery Note exists. In that case the SI has no serial numbers
+	(the DN didn't exist at SI submit time). After the DN is submitted here we
+	backfill the serial numbers directly into the already-submitted SI items.
+
+	Lookup paths:
+	  1. SI item.dn_detail  →  this DN item name  (standard SI-from-DN link)
+	  2. SI item.so_detail  →  same as DN item.so_detail  (SO→SI→DN flow)
+	"""
+	if not doc.items:
+		return
+
+	for item in doc.items:
+		serial_numbers = _get_serial_numbers_for_item(item)
+		if not serial_numbers:
+			continue
+
+		# Collect SI item candidates from both lookup paths
+		candidates = []
+
+		# Path 1: direct dn_detail link
+		candidates.extend(frappe.db.get_all(
+			"Sales Invoice Item",
+			filters={"dn_detail": item.name},
+			fields=["name", "parent", "description"]
+		))
+
+		# Path 2: shared so_detail (Q→SO→SI created before DN)
+		if item.so_detail:
+			candidates.extend(frappe.db.get_all(
+				"Sales Invoice Item",
+				filters={"so_detail": item.so_detail},
+				fields=["name", "parent", "description"]
+			))
+
+		# Deduplicate by SI item name
+		seen = set()
+		unique = []
+		for c in candidates:
+			if c.name not in seen:
+				seen.add(c.name)
+				unique.append(c)
+
+		for si_item in unique:
+			# Only update submitted SIs (docstatus = 1)
+			si_docstatus = frappe.db.get_value("Sales Invoice", si_item.parent, "docstatus")
+			if si_docstatus != 1:
+				continue
+
+			# Skip if serial numbers already present
+			if has_serial_numbers_in_description(si_item.description):
+				continue
+
+			new_description = append_serial_numbers_to_description(
+				si_item.description,
+				serial_numbers
+			)
+
+			frappe.db.set_value(
+				"Sales Invoice Item",
+				si_item.name,
+				"description",
+				new_description
+			)
+
+			frappe.logger().info(
+				f"DN {doc.name}: backfilled {len(serial_numbers)} serial(s) "
+				f"into submitted SI {si_item.parent}, item {si_item.name}"
+			)

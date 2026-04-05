@@ -126,8 +126,8 @@ def append_serial_numbers_to_description(description, serial_numbers):
 	if not description:
 		return serial_section
 
-	# Add two line breaks for separation
-	return f"{description}<br><br>{serial_section}"
+	# Add a proper blank paragraph for separation (Quill-compatible)
+	return f"{description}<p><br></p>{serial_section}"
 
 
 def format_serial_numbers_for_display(serial_numbers):
